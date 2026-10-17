@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>حاسبة المعدل – هندسة المعلوماتية</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>حاسبة المعدل – الهندسة المعلوماتية</h1>
+    <p>معدل كل سنة، والمعدل العام = مجموع معدلات السنوات ÷ 5، مع إحصائيات وإمكانية التعديل وإضافة المواد.</p>
+  </header>
+
+  <section id="load">
+    <h2>1) حمّل علاماتك</h2>
+    <ol class="steps">
+      <li>ادخل موقع الجامعة، اكتب رقمك الجامعي واضغط «استعلام».</li>
+      <li>إما أن تنزّل الجدول بصيغة <b>CSV</b> من خيار «Actions ← Download» وترفعه هنا، أو تنسخ الجدول كاملاً وتلصقه في المربع.</li>
+    </ol>
+    <div class="grid2">
+      <div id="dropzone" class="dropzone">
+        <p>اسحب ملف CSV إلى هنا أو</p>
+        <input type="file" id="file" accept=".csv,.tsv,.txt,text/csv,text/plain">
+      </div>
+      <div>
+        <textarea id="paste" placeholder="الصق جدول العلامات هنا (Ctrl+V)" aria-label="لصق جدول العلامات"></textarea>
+        <div class="row"><button type="button" id="btn-paste">تحليل الجدول الملصوق</button></div>
+      </div>
+    </div>
+    <div id="msg" class="msg" role="status" aria-live="polite"></div>
+    <div class="privacy">🔒 كل شيء يتم داخل متصفحك فقط: لا يُرسل رقمك الجامعي ولا علاماتك لأي خادم ولا يُخزَّن شيء على جهازك.</div>
+  </section>
+
+  <div id="results" hidden>
+    <section>
+      <h2>الملخص</h2>
+      <div class="row" style="margin:0 0 12px">
+        <label for="divisor">القسمة في المعدل العام على:</label>
+        <select id="divisor">
+          <option value="five">5 سنوات (افتراضي)</option>
+          <option value="available">عدد السنوات المتوفرة فقط</option>
+        </select>
+      </div>
+      <div id="summary" class="cards"></div>
+    </section>
+
+    <section>
+      <h2>معدل كل سنة (حسب سنة المقرر)</h2>
+      <div id="years" class="cards"></div>
+    </section>
+
+    <section class="grid2" style="display:grid">
+      <div><h3>المعدلات السنوية</h3><div id="chart-years"></div></div>
+      <div><h3>توزّع العلامات</h3><div id="chart-dist"></div></div>
+    </section>
+
+    <section class="grid2" style="display:grid">
+      <div><h3>أعلى 5 مواد</h3><ol id="top" class="rank"></ol></div>
+      <div><h3>أدنى 5 مواد</h3><ol id="bottom" class="rank"></ol></div>
+    </section>
+
+    <section>
+      <h2>2) عدّل المواد أو أضف مواد جديدة</h2>
+      <form id="add-form" class="add-grid" autocomplete="off">
+        <label>اسم المقرر<input type="text" id="a-name" maxlength="80" required></label>
+        <label>سنة المقرر<select id="a-year"></select></label>
+        <label>العملي<input type="number" id="a-p" min="0" max="100" step="any"></label>
+        <label>الامتحان<input type="number" id="a-e" min="0" max="100" step="any"></label>
+        <label>النهائية (اختياري)<input type="number" id="a-f" min="0" max="100" step="any"></label>
+        <button type="submit">إضافة</button>
+      </form>
+      <div class="row">
+        <label for="filter">عرض:</label>
+        <select id="filter">
+          <option value="all">كل المواد</option>
+          <option value="1">السنة الأولى</option>
+          <option value="2">السنة الثانية</option>
+          <option value="3">السنة الثالثة</option>
+          <option value="4">السنة الرابعة</option>
+          <option value="5">السنة الخامسة</option>
+          <option value="custom">المواد المضافة فقط</option>
+        </select>
+        <button type="button" class="secondary" id="btn-export">تنزيل CSV</button>
+        <button type="button" class="secondary" id="btn-reset">إعادة البيانات الأصلية</button>
+        <button type="button" class="danger" id="btn-clear">مسح كل البيانات</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>المقرر</th><th>سنة المقرر</th><th>العملي</th><th>الامتحان</th><th>النهائية</th><th>الحالة</th><th></th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <p id="empty-table" class="meta" hidden>لا توجد مواد ضمن هذا العرض.</p>
+      <p class="meta">عند تعديل العملي أو الامتحان تُحسب النهائية تلقائياً (مجموعهما حتى 100) ويمكنك تعديل النهائية يدوياً.</p>
+    </section>
+  </div>
+
+  <footer>أداة غير رسمية؛ المرجع الوحيد للعلامات هو موقع الجامعة.</footer>
+</div>
+<script src="parser.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
