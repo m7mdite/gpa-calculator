@@ -1,340 +1,462 @@
 (function () {
   'use strict';
 
-  var P = window.Parser;
-  var PASS = 60;
-  var YEARS = [1, 2, 3, 4, 5];
-  var YN = { 1: 'الأولى', 2: 'الثانية', 3: 'الثالثة', 4: 'الرابعة', 5: 'الخامسة' };
+  const P = window.Parser;
+  const YEARS = ['الأولى', 'الثانية', 'الثالثة', 'الرابعة', 'الخامسة', 'السادسة'];
+  const BANDS = [
+    { key: 'g1', min: 90, label: 'ممتاز' },
+    { key: 'g2', min: 80, label: 'جيد جداً' },
+    { key: 'g3', min: 70, label: 'جيد' },
+    { key: 'g4', min: 60, label: 'مقبول' },
+    { key: 'g5', min: -Infinity, label: 'راسب' }
+  ];
+  const PASS = 60;
 
-  var courses = [];
-  var snapshot = [];
-  var nextId = 1;
-  var filter = 'all';
+  let courses = [];
+  let snapshot = [];
+  let nextId = 1;
+  let mode = 'course';      // course | study
+  let weighted = false;
+  let divMode = 'five';     // five | avail
+  let tab = 'courses';
+  let yearFilter = 'all';
+  let query = '';
+  let editing = null;
+  let finalManual = false;
+  let delArmed = false;
+  let clearArmed = false;
+  let clearT;
 
-  function $(id) { return document.getElementById(id); }
-  function clear(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  const norm = P.norm;
+  const num = P.parseNum;
+  const band = v => BANDS.find(b => v >= b.min);
+  const fmt = (v, d = 2) => v == null ? '–' : v.toFixed(d);
+  const fmtMark = v => v == null ? '–' : (Number.isInteger(v) ? String(v) : v.toFixed(1));
+  const semRank = s => { const r = norm(s); return r.includes('اول') ? 1 : r.includes('ثاني') ? 2 : 3; };
+  const termCmp = (a, b) => (a.ay || '').localeCompare(b.ay || '') || semRank(a.sem) - semRank(b.sem);
+  const yearLabel = y => y === 0 ? 'غير محدد' : (YEARS[y - 1] ? 'السنة ' + YEARS[y - 1] : 'السنة ' + y);
 
-  function el(tag, opts, kids) {
-    var n = document.createElement(tag);
-    if (opts) {
-      Object.keys(opts).forEach(function (k) {
-        if (k === 'text') n.textContent = opts[k];
-        else if (k === 'class') n.className = opts[k];
-        else if (k === 'on') Object.keys(opts.on).forEach(function (ev) { n.addEventListener(ev, opts.on[ev]); });
-        else n.setAttribute(k, opts[k]);
-      });
-    }
-    (kids || []).forEach(function (c) { n.appendChild(c); });
-    return n;
+  // العروض تُضبط عبر CSSOM (مسموح بها في CSP) وليس عبر سمة style
+  function applyWidths(root) {
+    root.querySelectorAll('[data-w]').forEach(n => { n.style.width = n.getAttribute('data-w') + '%'; });
   }
+  function setHTML(node, html) { node.innerHTML = html; applyWidths(node); }
 
-  function fmt(n) {
-    if (n === null || n === undefined || isNaN(n)) return '—';
-    return n.toFixed(2).replace(/\.?0+$/, '');
-  }
-
-  function clamp(v) { return Math.max(0, Math.min(100, v)); }
-
-  function setMsg(text, kind) {
-    var m = $('msg');
-    m.textContent = text;
-    m.className = 'msg ' + (kind || '');
+  function addCourse(o) {
+    courses.push({
+      id: nextId++, name: o.name, cy: o.cy, ay: o.ay || '', sem: o.sem || 'فصل أول',
+      p: o.p ?? null, e: o.e ?? null, f: o.f, h: o.h ?? null, custom: !!o.custom, edited: !!o.edited
+    });
   }
 
   /* ---------- الحسابات ---------- */
-  function compute() {
-    var byYear = {};
-    YEARS.forEach(function (y) { byYear[y] = []; });
-    courses.forEach(function (c) { if (byYear[c.cy]) byYear[c.cy].push(c); });
-
-    var yearAvg = {};
-    YEARS.forEach(function (y) {
-      var a = byYear[y];
-      yearAvg[y] = a.length ? a.reduce(function (s, c) { return s + c.f; }, 0) / a.length : null;
-    });
-
-    var avail = YEARS.filter(function (y) { return yearAvg[y] !== null; });
-    var sum = avail.reduce(function (s, y) { return s + yearAvg[y]; }, 0);
-    var divisor = $('divisor').value === 'available' ? Math.max(avail.length, 1) : 5;
-    var overall = avail.length ? sum / divisor : null;
-
-    var sorted = courses.slice().sort(function (a, b) { return b.f - a.f; });
-    var passed = courses.filter(function (c) { return c.f >= PASS; }).length;
-    var mean = courses.length ? courses.reduce(function (s, c) { return s + c.f; }, 0) / courses.length : null;
-
-    return { byYear: byYear, yearAvg: yearAvg, avail: avail, overall: overall, divisor: divisor,
-             sorted: sorted, passed: passed, failed: courses.length - passed, mean: mean };
+  const wOf = c => (c.h && c.h > 0) ? c.h : 1;
+  function avg(list) {
+    const l = list.filter(c => c.f != null);
+    if (!l.length) return null;
+    if (weighted) {
+      const w = l.reduce((s, c) => s + wOf(c), 0);
+      return l.reduce((s, c) => s + c.f * wOf(c), 0) / w;
+    }
+    return l.reduce((s, c) => s + c.f, 0) / l.length;
+  }
+  function studyMap(list = courses) {
+    const ays = [...new Set(list.map(c => c.ay).filter(Boolean))].sort();
+    const m = {}; ays.forEach((a, i) => m[a] = i + 1); return m;
+  }
+  function yearOf(c, sm) { return mode === 'course' ? c.cy : (c.ay ? sm[c.ay] : 0); }
+  function groupByYear(list = courses) {
+    const sm = studyMap(list), g = new Map();
+    list.forEach(c => { const y = yearOf(c, sm); if (!g.has(y)) g.set(y, []); g.get(y).push(c); });
+    return [...g.entries()].sort((a, b) => a[0] - b[0]).map(([y, l]) => ({ y, list: l, avg: avg(l) }));
+  }
+  function divisorOf(groups) {
+    const k = groups.filter(g => g.avg != null).length;
+    return divMode === 'five' ? Math.max(5, k) : k;
+  }
+  function overall(groups) {
+    const a = groups.map(g => g.avg).filter(v => v != null);
+    if (!a.length) return null;
+    return a.reduce((s, v) => s + v, 0) / divisorOf(groups);
   }
 
   /* ---------- العرض ---------- */
-  function card(label, value, sub, cls) {
-    var kids = [el('div', { class: 'card-label', text: label }), el('div', { class: 'card-value', text: value })];
-    if (sub) kids.push(el('div', { class: 'card-sub', text: sub }));
-    return el('div', { class: 'card ' + (cls || '') }, kids);
+  function renderHero() {
+    const groups = groupByYear();
+    const ov = overall(groups);
+    const cum = avg(courses);
+    const sm = studyMap();
+    const mismatch = courses.filter(c => c.ay && sm[c.ay] !== c.cy).length;
+    const rows = groups.map(g => {
+      const b = g.avg != null ? band(g.avg) : null;
+      const w = g.avg == null ? 0 : Math.max(0, Math.min(100, g.avg));
+      return `<div class="rrow ${b ? 'b-' + b.key : ''}">
+        <div class="yl">${esc(yearLabel(g.y))}<small>${g.list.length} مقرراً</small></div>
+        <div class="track"><div class="fill" data-w="${w}"></div><span class="pass"></span></div>
+        <div class="v num">${fmt(g.avg)}</div></div>`;
+    }).join('');
+    setHTML($('hero'), `
+      <div>
+        <p class="lab">المعدل العام</p>
+        <p class="big num">${fmt(ov)}</p>
+        <p class="sub">مجموع معدلات السنوات ÷ <b class="num">${divisorOf(groups) || 5}</b> · المعدل التراكمي لكل المقررات: <b class="num">${fmt(cum)}</b> من <b class="num">${courses.length}</b> مقرراً</p>
+        <p class="lab2">تجميع السنوات</p>
+        <div class="seg" role="group" aria-label="طريقة تجميع السنوات">
+          <button type="button" data-mode="course" aria-pressed="${mode === 'course'}">حسب سنة المقرر</button>
+          <button type="button" data-mode="study" aria-pressed="${mode === 'study'}">حسب سنة الدراسة</button>
+        </div>
+        <p class="lab2">القسمة في المعدل العام</p>
+        <div class="seg" role="group" aria-label="القاسم">
+          <button type="button" data-div="five" aria-pressed="${divMode === 'five'}">على 5 سنوات</button>
+          <button type="button" data-div="avail" aria-pressed="${divMode === 'avail'}">على السنوات المتوفرة</button>
+        </div>
+        <label class="tgl"><input type="checkbox" id="wTgl" ${weighted ? 'checked' : ''}> ترجيح المعدل بعدد الساعات</label>
+        ${weighted ? '<p class="hint">المقررات بدون ساعات تُحسب بساعة واحدة.</p>' : ''}
+        ${mismatch && mode === 'course' ? `<p class="hint">${mismatch} مقرراً درسته في سنة غير سنته الأصلية، وهو محسوب مع سنة المقرر.</p>` : ''}
+      </div>
+      <div class="ruler">
+        ${rows || '<p class="sub">أضف مواد لتظهر معدلات السنوات.</p>'}
+        ${rows ? '<div class="rlegend">الخط الرمادي عند 60: حد النجاح</div>' : ''}
+      </div>`);
   }
 
-  function barList(box, items) {
-    clear(box);
-    items.forEach(function (it) {
-      var fill = el('div', { class: 'bar-fill ' + (it.cls || '') });
-      fill.style.width = Math.max(0, Math.min(100, it.pct)) + '%';
-      box.appendChild(el('div', { class: 'bar-row' }, [
-        el('div', { class: 'bar-label', text: it.label }),
-        el('div', { class: 'bar-track' }, [fill]),
-        el('div', { class: 'bar-value', text: it.value })
-      ]));
+  function renderCourses() {
+    const hadFocus = document.activeElement && document.activeElement.id === 'q';
+    const caret = hadFocus ? document.activeElement.selectionStart : 0;
+    const groups = groupByYear();
+    const sm = studyMap();
+    const q = norm(query);
+    const years = groups.map(g => g.y);
+    if (yearFilter !== 'all' && !years.map(String).includes(String(yearFilter))) yearFilter = 'all';
+
+    let html = `<div class="tools">
+      <input class="search" id="q" type="search" placeholder="ابحث عن مادة" value="${esc(query)}" aria-label="بحث">
+      <div class="chips" role="group" aria-label="تصفية حسب السنة">
+        <button type="button" class="chip" data-year="all" aria-pressed="${yearFilter === 'all'}">الكل</button>
+        ${years.map(y => `<button type="button" class="chip" data-year="${y}" aria-pressed="${String(yearFilter) === String(y)}">${esc(y === 0 ? 'غير محدد' : YEARS[y - 1] || y)}</button>`).join('')}
+      </div></div>`;
+
+    if (!courses.length) {
+      html += `<div class="empty"><p>ما في مواد بعد. ارفع ملف CSV، أو الصق الجدول من موقع الجامعة، أو أضف مادة يدوياً.</p>
+        <div class="btns">
+          <button class="btn primary" type="button" id="emptyUpload">رفع ملف CSV</button>
+          <button class="btn primary" type="button" id="emptyPaste">لصق الجدول</button>
+          <button class="btn" type="button" id="emptyAdd">إضافة مادة</button>
+        </div>
+        <p class="privacy">🔒 كل شيء يتم داخل متصفحك فقط: لا تُرسل علاماتك لأي خادم، ولا يُخزَّن شيء على جهازك.</p></div>`;
+      setHTML($('viewCourses'), html);
+      return;
+    }
+
+    let shown = 0;
+    groups.forEach(g => {
+      if (yearFilter !== 'all' && String(g.y) !== String(yearFilter)) return;
+      const list = g.list.filter(c => !q || norm(c.name).includes(q));
+      if (!list.length) return;
+      shown += list.length;
+      const terms = new Map();
+      list.forEach(c => { const k = c.ay + '|' + c.sem; if (!terms.has(k)) terms.set(k, []); terms.get(k).push(c); });
+      const termList = [...terms.values()].map(l => ({ ay: l[0].ay, sem: l[0].sem, l })).sort(termCmp);
+      html += `<section class="year"><div class="yhead"><h2>${esc(yearLabel(g.y))}</h2><span class="ya num">${fmt(g.avg)}</span></div>`;
+      termList.forEach(t => {
+        html += `<div class="term"><span>${t.ay ? esc(t.ay) + ' · ' : ''}${esc(t.sem)}</span><span class="num">معدل الفصل ${fmt(avg(t.l))}</span></div><div class="list">`;
+        t.l.forEach(c => {
+          const b = c.f != null ? band(c.f) : null;
+          const parts = [];
+          if (c.p != null) parts.push('عملي ' + fmtMark(c.p));
+          if (c.e != null) parts.push('امتحان ' + fmtMark(c.e));
+          if (mode === 'study' && c.cy !== g.y) parts.push('مقرر ' + (YEARS[c.cy - 1] || c.cy));
+          if (mode === 'course' && c.ay && sm[c.ay] !== c.cy) parts.push('درسته في السنة ' + (YEARS[sm[c.ay] - 1] || ''));
+          if (c.h) parts.push(c.h + ' ساعة');
+          if (c.custom) parts.push('مضافة');
+          else if (c.edited) parts.push('معدّلة');
+          html += `<button type="button" class="row" data-edit="${c.id}"><div><div class="nm">${esc(c.name)}</div>
+            <div class="meta num">${esc(parts.join(' · ') || 'تعديل')}</div></div>
+            <div class="mark num ${b ? 'b-' + b.key : ''}">${fmtMark(c.f)}</div></button>`;
+        });
+        html += `</div>`;
+      });
+      html += `</section>`;
     });
+    if (!shown) html += `<div class="empty"><p>ما في مواد مطابقة للبحث.</p></div>`;
+    setHTML($('viewCourses'), html);
+    if (hadFocus) { const qi = $('q'); qi.focus(); qi.setSelectionRange(caret, caret); }
   }
 
-  function rankList(box, list) {
-    clear(box);
-    list.forEach(function (c) {
-      box.appendChild(el('li', {}, [
-        el('span', { class: 'rk-name', text: c.name }),
-        el('span', { class: 'rk-year', text: YN[c.cy] }),
-        el('span', { class: 'rk-mark ' + (c.f >= PASS ? 'ok' : 'bad'), text: fmt(c.f) })
-      ]));
+  function termSeries() {
+    const m = new Map();
+    courses.filter(c => c.f != null).forEach(c => { const k = c.ay + '|' + c.sem; if (!m.has(k)) m.set(k, []); m.get(k).push(c); });
+    return [...m.values()].map(l => ({ ay: l[0].ay, sem: l[0].sem, avg: avg(l), n: l.length })).sort(termCmp);
+  }
+
+  function renderChart(series) {
+    if (!series.length) return '<p class="note">ما في بيانات كافية.</p>';
+    const W = 400, H = 200, pr = 34, pl = 14, pt = 20, pb = 40;
+    const lo = Math.min(50, Math.floor(Math.min(...series.map(s => s.avg)) / 10) * 10), hi = 100;
+    const y = v => pt + (hi - v) / (hi - lo) * (H - pt - pb);
+    const x = i => series.length === 1 ? (W - pr + pl) / 2 : (W - pr) - i * (W - pr - pl) / (series.length - 1);
+    let g = '';
+    for (let v = lo; v <= hi; v += 10) {
+      const isPass = v === PASS;
+      g += `<line x1="${pl}" x2="${W - pr}" y1="${y(v)}" y2="${y(v)}" stroke="${isPass ? 'var(--g5)' : 'var(--line)'}"${isPass ? ' stroke-dasharray="4 4"' : ''}/>
+            <text x="${W - pr + 6}" y="${y(v) + 3.5}" class="num">${v}</text>`;
+    }
+    const pts = series.map((s, i) => `${x(i)},${y(s.avg)}`).join(' ');
+    let dots = '';
+    series.forEach((s, i) => {
+      const b = band(s.avg);
+      const ay = /^\d{4}-\d{4}$/.test(s.ay || '') ? s.ay.slice(2, 4) + '/' + s.ay.slice(7) : '';
+      dots += `<circle cx="${x(i)}" cy="${y(s.avg)}" r="4.5" fill="var(--${b.key})" stroke="var(--surface)" stroke-width="2"/>
+        <text class="val num" x="${x(i)}" y="${y(s.avg) - 9}" text-anchor="middle">${s.avg.toFixed(1)}</text>
+        <text x="${x(i)}" y="${H - 22}" text-anchor="middle">ف${semRank(s.sem)}</text>
+        <text x="${x(i)}" y="${H - 9}" text-anchor="middle" class="num">${esc(ay)}</text>`;
     });
+    return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="معدل كل فصل دراسي">${g}
+      <polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>${dots}</svg>`;
   }
 
   function renderStats() {
-    var s = compute();
+    const done = courses.filter(c => c.f != null);
+    if (!done.length) { setHTML($('viewStats'), '<div class="empty"><p>أضف مواد لتظهر الإحصائيات.</p></div>'); return; }
+    const sorted = [...done].sort((a, b) => b.f - a.f);
+    const best = sorted[0], worst = sorted[sorted.length - 1];
+    const failing = done.filter(c => c.f < PASS).length;
+    const high = done.filter(c => c.f >= 80).length;
+    const series = termSeries();
+    const bestTerm = series.length ? [...series].sort((a, b) => b.avg - a.avg)[0] : null;
+    const counts = BANDS.map(b => ({ ...b, n: done.filter(c => band(c.f) === b).length }));
+    const maxN = Math.max(...counts.map(c => c.n), 1);
+    const li = c => `<li><span>${esc(c.name)}</span><span class="mark num b-${band(c.f).key}">${fmtMark(c.f)}</span></li>`;
+    const mean = key => { const l = done.filter(c => c[key] != null); return l.length ? l.reduce((s, c) => s + c[key], 0) / l.length : null; };
 
-    var sum = $('summary'); clear(sum);
-    var overallSub = s.avail.length < 5 && $('divisor').value === 'five'
-      ? 'السنوات المتوفرة: ' + s.avail.length + ' من 5' : 'مجموع معدلات السنوات ÷ ' + s.divisor;
-    sum.appendChild(card('المعدل العام', fmt(s.overall), overallSub, 'main'));
-    sum.appendChild(card('عدد المواد', String(courses.length), ''));
-    sum.appendChild(card('ناجح / راسب', s.passed + ' / ' + s.failed, 'حد النجاح ' + PASS, s.failed ? 'warn' : ''));
-    sum.appendChild(card('متوسط كل المواد', fmt(s.mean), 'بدون تجميع بالسنوات'));
-    if (s.sorted.length) {
-      var top = s.sorted[0], low = s.sorted[s.sorted.length - 1];
-      sum.appendChild(card('أعلى علامة', fmt(top.f), top.name));
-      sum.appendChild(card('أدنى علامة', fmt(low.f), low.name));
+    setHTML($('viewStats'), `
+      <div class="cards">
+        <div class="card"><p class="k">أعلى علامة</p><p class="n num">${fmtMark(best.f)}</p><p class="d">${esc(best.name)}</p></div>
+        <div class="card"><p class="k">أدنى علامة</p><p class="n num">${fmtMark(worst.f)}</p><p class="d">${esc(worst.name)}</p></div>
+        <div class="card"><p class="k">علامات 80 فما فوق</p><p class="n num">${high} <small>من ${done.length}</small></p><p class="d num">${(high / done.length * 100).toFixed(0)}% من المقررات</p></div>
+        <div class="card"><p class="k">مقررات تحت ${PASS}</p><p class="n num ${failing ? 'bad' : ''}">${failing}</p><p class="d">${failing ? 'تحتاج إعادة' : 'لا يوجد رسوب'}</p></div>
+      </div>
+      <div class="panel"><h3>معدل كل فصل</h3>${renderChart(series)}
+        ${bestTerm ? `<p class="note">أفضل فصل: ${esc(bestTerm.ay)} · ${esc(bestTerm.sem)} بمعدل <b class="num">${bestTerm.avg.toFixed(2)}</b></p>` : ''}</div>
+      <div class="panel"><h3>توزيع التقديرات</h3><div class="dist">
+        ${counts.map(c => `<div class="drow b-${c.key}"><span>${c.label}</span><div class="dbar"><i data-w="${c.n / maxN * 100}"></i></div><span class="c num">${c.n}</span></div>`).join('')}
+      </div></div>
+      <div class="two">
+        <div class="panel"><h3>أعلى 5 علامات</h3><ul class="mini">${sorted.slice(0, 5).map(li).join('')}</ul></div>
+        <div class="panel"><h3>أدنى 5 علامات</h3><ul class="mini">${[...sorted].reverse().slice(0, 5).map(li).join('')}</ul></div>
+      </div>
+      <div class="panel"><h3>العملي والامتحان</h3>
+        <p class="sm">متوسط علامة العملي (للمواد التي لها عملي): <b class="num">${fmt(mean('p'), 1)}</b><br>
+        متوسط علامة الامتحان: <b class="num">${fmt(mean('e'), 1)}</b></p></div>`);
+  }
+
+  function render() {
+    renderHero(); renderCourses(); renderStats();
+    $('viewCourses').hidden = tab !== 'courses';
+    $('viewStats').hidden = tab !== 'stats';
+    $('tabCourses').setAttribute('aria-selected', tab === 'courses');
+    $('tabStats').setAttribute('aria-selected', tab === 'stats');
+    $('fab').hidden = tab !== 'courses';
+    $('btnExport').hidden = !courses.length;
+    $('btnReset').hidden = !snapshot.length;
+    $('btnClear').hidden = !courses.length && !snapshot.length;
+  }
+
+  let toastT;
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('on');
+    clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('on'), 2600);
+  }
+
+  /* ---------- نافذة الإضافة والتعديل ---------- */
+  function ensureOption(sel, value) {
+    if (value && ![...sel.options].some(o => o.value === value)) {
+      const o = document.createElement('option'); o.textContent = value; o.value = value; sel.appendChild(o);
     }
-
-    var ys = $('years'); clear(ys);
-    YEARS.forEach(function (y) {
-      var n = s.byYear[y].length;
-      ys.appendChild(card('السنة ' + YN[y], fmt(s.yearAvg[y]), n ? n + ' مواد' : 'لا مواد', n ? '' : 'empty'));
+  }
+  function refreshAyList() {
+    const dl = $('ayList');
+    while (dl.firstChild) dl.removeChild(dl.firstChild);
+    [...new Set(courses.map(c => c.ay).filter(Boolean))].sort().forEach(a => {
+      const o = document.createElement('option'); o.value = a; dl.appendChild(o);
     });
-
-    barList($('chart-years'), YEARS.map(function (y) {
-      var v = s.yearAvg[y];
-      return { label: YN[y], value: fmt(v), pct: v === null ? 0 : v, cls: v !== null && v < PASS ? 'bad' : '' };
-    }));
-
-    var bins = [
-      { label: 'أقل من 60 (راسب)', test: function (v) { return v < 60; }, cls: 'bad' },
-      { label: '60 – 69', test: function (v) { return v >= 60 && v < 70; } },
-      { label: '70 – 79', test: function (v) { return v >= 70 && v < 80; } },
-      { label: '80 – 89', test: function (v) { return v >= 80 && v < 90; } },
-      { label: '90 فأكثر', test: function (v) { return v >= 90; }, cls: 'good' }
-    ];
-    var total = Math.max(courses.length, 1);
-    barList($('chart-dist'), bins.map(function (b) {
-      var n = courses.filter(function (c) { return b.test(c.f); }).length;
-      return { label: b.label, value: String(n), pct: n / total * 100, cls: b.cls };
-    }));
-
-    rankList($('top'), s.sorted.slice(0, 5));
-    rankList($('bottom'), s.sorted.slice(-5).reverse());
+  }
+  function readForm() {
+    const p = num($('fP').value), e = num($('fE').value);
+    let f = num($('fF').value);
+    if (f == null && (p != null || e != null)) f = (p || 0) + (e || 0);
+    return {
+      name: $('fName').value.trim(), cy: +$('fCy').value, sem: $('fSem').value,
+      ay: $('fAy').value.trim().replace('/', '-'), p, e, f, h: num($('fH').value)
+    };
+  }
+  function updatePreview() {
+    const d = readForm(), out = $('prev');
+    if (d.f == null || d.f < 0 || d.f > 100) { out.textContent = ''; return; }
+    const before = overall(groupByYear());
+    const list = courses.filter(c => c !== editing).concat([Object.assign({ id: -1 }, d)]);
+    const after = overall(groupByYear(list));
+    out.textContent = 'المعدل العام: ' + fmt(before) + '  ←  ' + fmt(after) + '  (إن حفظت)';
+  }
+  function openEdit(id) {
+    editing = id ? courses.find(c => c.id === id) : null;
+    delArmed = false; $('btnDel').textContent = 'حذف المادة'; $('btnDel').classList.remove('armed');
+    $('err').textContent = '';
+    $('dlgTitle').textContent = editing ? 'تعديل المادة' : 'إضافة مادة';
+    $('btnDel').hidden = !editing;
+    refreshAyList();
+    const last = courses[courses.length - 1];
+    const c = editing || { name: '', cy: last ? last.cy : 1, ay: last ? last.ay : '', sem: last ? last.sem : 'فصل أول', p: null, e: null, f: null, h: null };
+    ensureOption($('fSem'), c.sem);
+    $('fName').value = c.name;
+    $('fCy').value = c.cy;
+    $('fSem').value = c.sem;
+    $('fAy').value = c.ay;
+    $('fP').value = c.p ?? ''; $('fE').value = c.e ?? ''; $('fF').value = c.f ?? ''; $('fH').value = c.h ?? '';
+    finalManual = editing ? (c.f != null && c.f !== (c.p || 0) + (c.e || 0)) : false;
+    updatePreview();
+    $('dlg').showModal();
+    if (!editing) $('fName').focus();
+  }
+  function autoFinal() {
+    if (finalManual) return;
+    const p = num($('fP').value), e = num($('fE').value);
+    $('fF').value = (p == null && e == null) ? '' : String(Math.round(((p || 0) + (e || 0)) * 100) / 100);
+  }
+  function saveCourse() {
+    const d = readForm();
+    const err = m => { $('err').textContent = m; };
+    if (!d.name) return err('اكتب اسم المقرر.');
+    if (d.f == null) return err('أدخل العلامة النهائية، أو علامتي العملي والامتحان.');
+    if (d.f < 0 || d.f > 100 || (d.p != null && d.p < 0) || (d.e != null && d.e < 0)) return err('العلامات لازم تكون بين 0 و100.');
+    if (d.h != null && d.h <= 0) return err('عدد الساعات لازم يكون أكبر من صفر.');
+    if (d.ay && !/^\d{4}-\d{4}$/.test(d.ay)) return err('اكتب العام بالشكل 2025-2026، أو اتركه فارغاً.');
+    const wasEdit = !!editing;
+    if (editing) {
+      const changed = ['name', 'cy', 'sem', 'ay', 'p', 'e', 'f', 'h'].some(k => editing[k] !== d[k]);
+      Object.assign(editing, d);
+      if (changed && !editing.custom) editing.edited = true;
+    } else {
+      addCourse(Object.assign({ custom: true }, d));
+    }
+    $('dlg').close(); render();
+    toast(wasEdit ? 'تم حفظ التعديل وتحدّثت الإحصائيات' : 'تمت إضافة المادة وتحدّثت الإحصائيات');
   }
 
-  function statusFor(c) { return c.f >= PASS ? 'ناجح' : 'راسب'; }
-
-  function renderTable() {
-    var body = $('tbody'); clear(body);
-    var list = courses.filter(function (c) {
-      if (filter === 'all') return true;
-      if (filter === 'custom') return !!c.custom;
-      return c.cy === Number(filter);
-    });
-    list.sort(function (a, b) { return a.cy - b.cy; });
-
-    list.forEach(function (c) {
-      var badgeHost = el('div', { class: 'badges' });
-      if (c.custom) badgeHost.appendChild(el('span', { class: 'badge', text: 'مضافة' }));
-      else if (c.edited) badgeHost.appendChild(el('span', { class: 'badge', text: 'معدّلة' }));
-      function markEdited() {
-        if (!c.edited && !c.custom) { c.edited = true; badgeHost.appendChild(el('span', { class: 'badge', text: 'معدّلة' })); }
-      }
-
-      var nameIn = el('input', { type: 'text', maxlength: '80', 'aria-label': 'اسم المقرر' });
-      nameIn.value = c.name;
-      nameIn.addEventListener('change', function () {
-        var v = nameIn.value.trim();
-        if (!v) { nameIn.value = c.name; return; }
-        c.name = v; markEdited(); renderStats();
-      });
-      var meta = (c.ac || c.term) ? [c.ac, c.term].filter(Boolean).join(' · ') : '';
-      var nameCell = el('td', { class: 'name-cell' }, [nameIn, el('div', { class: 'meta', text: meta }), badgeHost]);
-
-      var sel = el('select', { 'aria-label': 'سنة المقرر' });
-      YEARS.forEach(function (y) {
-        var o = el('option', { value: String(y), text: YN[y] });
-        if (y === c.cy) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.addEventListener('change', function () { c.cy = Number(sel.value); markEdited(); renderStats(); if (filter !== 'all') renderTable(); });
-
-      var statusCell = el('td', { class: 'status ' + (c.f >= PASS ? 'ok' : 'bad'), text: statusFor(c) });
-
-      function numIn(key, label) {
-        var i = el('input', { type: 'number', min: '0', max: '100', step: 'any', inputmode: 'decimal', 'aria-label': label });
-        i.value = c[key] === null ? '' : String(c[key]);
-        return i;
-      }
-      var pIn = numIn('p', 'علامة العملي');
-      var eIn = numIn('e', 'علامة الامتحان');
-      var fIn = numIn('f', 'العلامة النهائية');
-
-      function refreshStatus() {
-        statusCell.textContent = statusFor(c);
-        statusCell.className = 'status ' + (c.f >= PASS ? 'ok' : 'bad');
-      }
-      function onPE() {
-        var pv = P.parseNum(pIn.value), ev = P.parseNum(eIn.value);
-        c.p = pv === null ? null : clamp(pv);
-        c.e = ev === null ? null : clamp(ev);
-        c.f = clamp((c.p || 0) + (c.e || 0));
-        fIn.value = String(c.f);
-        markEdited(); refreshStatus(); renderStats();
-      }
-      pIn.addEventListener('input', onPE);
-      eIn.addEventListener('input', onPE);
-      fIn.addEventListener('input', function () {
-        var v = P.parseNum(fIn.value);
-        c.f = v === null ? 0 : clamp(v);
-        markEdited(); refreshStatus(); renderStats();
-      });
-
-      var del = el('button', { type: 'button', class: 'btn-icon', title: 'حذف المقرر', 'aria-label': 'حذف المقرر', text: '✕' });
-      del.addEventListener('click', function () {
-        courses = courses.filter(function (x) { return x.id !== c.id; });
-        renderAll();
-      });
-
-      body.appendChild(el('tr', {}, [
-        nameCell,
-        el('td', {}, [sel]),
-        el('td', {}, [pIn]), el('td', {}, [eIn]), el('td', {}, [fIn]),
-        statusCell,
-        el('td', {}, [del])
-      ]));
-    });
-
-    $('empty-table').hidden = list.length !== 0;
-  }
-
-  function renderAll() {
-    $('results').hidden = courses.length === 0 && snapshot.length === 0;
-    renderStats();
-    renderTable();
-  }
-
-  /* ---------- التحميل ---------- */
+  /* ---------- الاستيراد والتصدير ---------- */
   function loadText(text) {
-    var res = P.parseText(text);
-    if (!res.rows.length) {
-      setMsg('لم أجد أي علامات صالحة. تأكد أنك نسخت الجدول كاملاً أو رفعت ملف CSV الصحيح.', 'error');
-      return;
-    }
-    courses = res.rows.map(function (r) {
-      return { id: nextId++, ac: r.ac, term: r.term, name: r.name, cy: r.cy, p: r.p, e: r.e, f: r.f };
-    });
+    const res = P.parseText(text);
+    if (!res.rows.length) return 0;
+    courses = []; nextId = 1;
+    res.rows.forEach(r => addCourse({ name: r.name, cy: r.cy, p: r.p, e: r.e, f: r.f, h: r.h, ay: r.ac, sem: r.term || 'فصل أول' }));
     snapshot = JSON.parse(JSON.stringify(courses));
-    filter = 'all'; $('filter').value = 'all';
-    renderAll();
-    var note = res.skipped ? ' (تم تجاهل ' + res.skipped + ' سطر غير صالح أو عناوين)' : '';
-    setMsg('تم تحميل ' + courses.length + ' مقرراً' + note + '. البيانات تبقى في متصفحك فقط.', 'ok');
-    $('results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    yearFilter = 'all'; query = '';
+    render();
+    return courses.length;
   }
-
   function handleFile(file) {
     if (!file) return;
-    if (/\.xlsx?$/i.test(file.name)) {
-      setMsg('ملفات Excel غير مدعومة مباشرة. افتح الملف واحفظه بصيغة CSV (أو انسخ الجدول والصقه في المربع).', 'error');
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) { setMsg('الملف كبير جداً (الحد 5 ميغابايت).', 'error'); return; }
-    var fr = new FileReader();
-    fr.onload = function () { loadText(P.decodeBytes(fr.result)); };
-    fr.onerror = function () { setMsg('تعذّرت قراءة الملف.', 'error'); };
-    fr.readAsArrayBuffer(file);
+    if (/\.xlsx?$/i.test(file.name)) { toast('ملفات Excel غير مدعومة. احفظها CSV أو انسخ الجدول والصقه.'); return; }
+    if (file.size > 5 * 1024 * 1024) { toast('الملف كبير جداً (الحد 5 ميغابايت).'); return; }
+    const rd = new FileReader();
+    rd.onload = () => {
+      const n = loadText(P.decodeBytes(rd.result));
+      toast(n ? 'تم تحميل ' + n + ' مقرراً' : 'ما لقيت مواد في الملف. تأكد أنه جدول العلامات.');
+    };
+    rd.onerror = () => toast('تعذّرت قراءة الملف.');
+    rd.readAsArrayBuffer(file);
   }
-
-  /* ---------- التصدير ---------- */
   function csvCell(v) {
-    var s = v === null || v === undefined ? '' : String(v);
+    let s = v === null || v === undefined ? '' : String(v);
     if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
     return /[",\n\r;]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
-
   function exportCsv() {
-    var head = ['عام التقديم', 'الفصل الدراسي', 'اسم المقرر', 'سنة المقرر', 'علامة العملي', 'علامة الامتحان', 'العلامة النهائية'];
-    var lines = [head.map(csvCell).join(',')];
-    courses.slice().sort(function (a, b) { return a.cy - b.cy; }).forEach(function (c) {
-      lines.push([c.ac, c.term, c.name, YN[c.cy], c.p, c.e, c.f].map(csvCell).join(','));
-    });
-    var blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
+    const head = ['عام التقديم', 'الفصل الدراسي', 'اسم المقرر', 'سنة المقرر', 'علامة العملي', 'علامة الامتحان', 'العلامة النهائية', 'الساعات'];
+    const lines = [head.map(csvCell).join(',')];
+    [...courses].sort((a, b) => (a.ay || '').localeCompare(b.ay || '') || semRank(a.sem) - semRank(b.sem))
+      .forEach(c => lines.push([c.ay, c.sem, c.name, YEARS[c.cy - 1] || c.cy, c.p, c.e, c.f, c.h].map(csvCell).join(',')));
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
     a.href = url; a.download = 'marks.csv';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('تم تنزيل الملف');
   }
 
   /* ---------- الأحداث ---------- */
-  $('file').addEventListener('change', function (e) { handleFile(e.target.files[0]); e.target.value = ''; });
+  function refocus(sel) { const n = document.querySelector(sel); if (n) n.focus(); }
 
-  var dz = $('dropzone');
-  ['dragenter', 'dragover'].forEach(function (ev) {
-    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.add('over'); });
+  document.addEventListener('click', ev => {
+    const t = ev.target.closest('button, input#wTgl'); if (!t) return;
+    if (t.dataset.mode) { mode = t.dataset.mode; render(); refocus('[data-mode="' + mode + '"]'); }
+    else if (t.dataset.div) { divMode = t.dataset.div; render(); refocus('[data-div="' + divMode + '"]'); }
+    else if (t.id === 'wTgl') { weighted = t.checked; render(); refocus('#wTgl'); }
+    else if (t.dataset.year) { yearFilter = t.dataset.year; render(); }
+    else if (t.dataset.edit) { openEdit(+t.dataset.edit); }
+    else if (t.id === 'fab' || t.id === 'emptyAdd') { openEdit(null); }
+    else if (t.id === 'emptyUpload') { $('file').click(); }
+    else if (t.id === 'emptyPaste') { openPaste(); }
   });
-  ['dragleave', 'drop'].forEach(function (ev) {
-    dz.addEventListener(ev, function (e) { e.preventDefault(); dz.classList.remove('over'); });
+  $('tabCourses').onclick = () => { tab = 'courses'; render(); };
+  $('tabStats').onclick = () => { tab = 'stats'; render(); };
+  $('btnUpload').onclick = () => $('file').click();
+  $('file').onchange = e => { handleFile(e.target.files[0]); e.target.value = ''; };
+  $('btnExport').onclick = exportCsv;
+
+  document.addEventListener('input', ev => {
+    const id = ev.target.id;
+    if (id === 'q') { query = ev.target.value; renderCourses(); }
+    else if (id === 'fP' || id === 'fE') { autoFinal(); updatePreview(); }
+    else if (id === 'fF') { finalManual = ev.target.value.trim() !== ''; if (!finalManual) autoFinal(); updatePreview(); }
+    else if (ev.target.closest && ev.target.closest('#form')) updatePreview();
   });
-  dz.addEventListener('drop', function (e) { handleFile(e.dataTransfer.files[0]); });
+  $('form').addEventListener('change', updatePreview);
+  $('form').addEventListener('submit', ev => { ev.preventDefault(); saveCourse(); });
+  $('btnCancel').onclick = () => $('dlg').close();
+  $('dlg').addEventListener('click', ev => { if (ev.target === $('dlg')) $('dlg').close(); });
+  $('btnDel').onclick = () => {
+    if (!delArmed) { delArmed = true; $('btnDel').textContent = 'اضغط مرة ثانية للتأكيد'; $('btnDel').classList.add('armed'); return; }
+    courses = courses.filter(c => c !== editing); $('dlg').close(); render(); toast('تم حذف المادة وتحدّثت الإحصائيات');
+  };
 
-  $('btn-paste').addEventListener('click', function () {
-    var t = $('paste').value;
-    if (!t.trim()) { setMsg('الصق الجدول أولاً.', 'error'); return; }
-    loadText(t);
+  function openPaste() {
+    $('pText').value = ''; $('perr').textContent = '';
+    $('pdlg').showModal(); $('pText').focus();
+  }
+  $('btnPaste').onclick = openPaste;
+  $('pCancel').onclick = () => $('pdlg').close();
+  $('pdlg').addEventListener('click', ev => { if (ev.target === $('pdlg')) $('pdlg').close(); });
+  $('pform').addEventListener('submit', ev => {
+    ev.preventDefault();
+    const text = $('pText').value;
+    if (!text.trim()) { $('perr').textContent = 'الصق الجدول أولاً.'; return; }
+    const n = loadText(text);
+    if (!n) { $('perr').textContent = 'ما لقيت علامات صالحة. تأكد أنك نسخت الجدول كاملاً.'; return; }
+    $('pText').value = '';
+    $('pdlg').close(); toast('تم تحميل ' + n + ' مقرراً');
   });
 
-  $('divisor').addEventListener('change', renderStats);
-  $('filter').addEventListener('change', function (e) { filter = e.target.value; renderTable(); });
-  $('btn-export').addEventListener('click', exportCsv);
-
-  $('btn-reset').addEventListener('click', function () {
+  $('btnReset').onclick = () => {
     courses = JSON.parse(JSON.stringify(snapshot));
-    renderAll();
-    setMsg('تمت إعادة البيانات الأصلية.', 'ok');
-  });
+    nextId = courses.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+    render(); toast('تمت إعادة البيانات الأصلية');
+  };
+  $('btnClear').onclick = () => {
+    const b = $('btnClear');
+    if (!clearArmed) {
+      clearArmed = true; b.textContent = 'اضغط مرة ثانية للتأكيد'; b.classList.add('armed');
+      clearT = setTimeout(() => { clearArmed = false; b.textContent = 'مسح الكل'; b.classList.remove('armed'); }, 4000);
+      return;
+    }
+    clearTimeout(clearT); clearArmed = false; b.textContent = 'مسح الكل'; b.classList.remove('armed');
+    courses = []; snapshot = []; nextId = 1; yearFilter = 'all'; query = '';
+    render(); toast('تم مسح كل البيانات من الصفحة');
+  };
 
-  $('btn-clear').addEventListener('click', function () {
-    courses = []; snapshot = [];
-    $('paste').value = '';
-    $('results').hidden = true;
-    setMsg('تم مسح كل البيانات من الصفحة.', 'ok');
-  });
-
-  $('add-form').addEventListener('submit', function (e) {
-    e.preventDefault();
-    var name = $('a-name').value.trim();
-    var cy = Number($('a-year').value);
-    var p = P.parseNum($('a-p').value), ev = P.parseNum($('a-e').value), f = P.parseNum($('a-f').value);
-    if (!name) { setMsg('اكتب اسم المقرر.', 'error'); return; }
-    if (p === null && ev === null && f === null) { setMsg('أدخل علامة العملي أو الامتحان أو النهائية.', 'error'); return; }
-    var fin = f !== null ? clamp(f) : clamp((p || 0) + (ev || 0));
-    courses.push({ id: nextId++, ac: '', term: '', name: name, cy: cy,
-      p: p === null ? null : clamp(p), e: ev === null ? null : clamp(ev), f: fin, custom: true });
-    $('add-form').reset();
-    renderAll();
-    setMsg('أُضيف المقرر «' + name + '».', 'ok');
-  });
-
-  // قائمة سنوات نموذج الإضافة
-  YEARS.forEach(function (y) { $('a-year').appendChild(el('option', { value: String(y), text: YN[y] })); });
+  $('fCy').innerHTML = YEARS.map((y, i) => `<option value="${i + 1}">${y}</option>`).join('');
+  render();
 })();

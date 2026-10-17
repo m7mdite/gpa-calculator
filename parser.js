@@ -3,16 +3,16 @@
 
   function toDigits(s) {
     return String(s == null ? '' : s)
-      .replace(/[\u0660-\u0669]/g, function (d) { return String(d.charCodeAt(0) - 0x0660); })
-      .replace(/[\u06F0-\u06F9]/g, function (d) { return String(d.charCodeAt(0) - 0x06F0); });
+      .replace(/[٠-٩]/g, function (d) { return String(d.charCodeAt(0) - 0x0660); })
+      .replace(/[۰-۹]/g, function (d) { return String(d.charCodeAt(0) - 0x06F0); });
   }
 
   function norm(s) {
     return String(s == null ? '' : s)
-      .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
-      .replace(/[\u0623\u0625\u0622\u0671]/g, '\u0627')
-      .replace(/\u0649/g, '\u064A')
-      .replace(/\u0629/g, '\u0647')
+      .replace(/[ً-ٰٟـ]/g, '')
+      .replace(/[أإآٱ]/g, 'ا')
+      .replace(/ى/g, 'ي')
+      .replace(/ة/g, 'ه')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -24,18 +24,15 @@
     return isFinite(v) ? v : null;
   }
 
+  var YEAR_NAMES = ['الأولى', 'الثانية', 'الثالثة', 'الرابعة', 'الخامسة', 'السادسة'];
   var YEAR_KEYS = {};
-  YEAR_KEYS[norm('\u0627\u0644\u0623\u0648\u0644\u0649').replace(/^\u0627\u0644/, '')] = 1;
-  YEAR_KEYS[norm('\u0627\u0644\u062B\u0627\u0646\u064A\u0629').replace(/^\u0627\u0644/, '')] = 2;
-  YEAR_KEYS[norm('\u0627\u0644\u062B\u0627\u0644\u062B\u0629').replace(/^\u0627\u0644/, '')] = 3;
-  YEAR_KEYS[norm('\u0627\u0644\u0631\u0627\u0628\u0639\u0629').replace(/^\u0627\u0644/, '')] = 4;
-  YEAR_KEYS[norm('\u0627\u0644\u062E\u0627\u0645\u0633\u0629').replace(/^\u0627\u0644/, '')] = 5;
+  YEAR_NAMES.forEach(function (n, i) { YEAR_KEYS[norm(n).replace(/^ال/, '')] = i + 1; });
 
   function yearNum(s) {
-    var n = norm(s).replace(/^\u0627\u0644/, '');
+    var n = norm(s).replace(/^ال/, '');
     if (YEAR_KEYS[n]) return YEAR_KEYS[n];
     var d = toDigits(n);
-    return /^[1-5]$/.test(d) ? Number(d) : 0;
+    return /^[1-6]$/.test(d) ? Number(d) : 0;
   }
 
   // "20222021" -> "2021-2022"
@@ -46,6 +43,8 @@
       var a = Number(m[1]), b = Number(m[2]);
       return Math.min(a, b) + '-' + Math.max(a, b);
     }
+    var m2 = /^(\d{4})\s*[-\/]\s*(\d{4})$/.exec(t);
+    if (m2) return m2[1] + '-' + m2[2];
     return t;
   }
 
@@ -75,10 +74,10 @@
     return sc > cm ? ';' : ',';
   }
 
-  var GROUP_RE = /\u0639\u0627\u0645 \u0627\u0644\u062A\u0642\u062F\u064A\u0645\s*:\s*([0-9\u0660-\u0669\u06F0-\u06F9]+)\s*[,\u060C]\s*\u0627\u0644\u0641\u0635\u0644 \u0627\u0644\u062F\u0631\u0627\u0633\u064A\s*:\s*(.+)$/;
+  var GROUP_RE = /عام\s+التقديم\s*:\s*([0-9٠-٩۰-۹]+)\s*[,،]\s*الفصل\s+الدراسي\s*:\s*(.+)$/;
 
   function parseText(text) {
-    var lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/)
+    var lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/)
       .filter(function (l) { return l.trim() !== ''; });
     var rows = [], skipped = 0;
     if (!lines.length) return { rows: rows, skipped: 0 };
@@ -86,6 +85,7 @@
     var d = detectDelimiter(lines);
     var ctx = { ac: '', term: '' };
     var map = null;
+    var NAME_KEY = norm('اسم المقرر');
 
     for (var li = 0; li < lines.length; li++) {
       var line = lines[li];
@@ -95,16 +95,17 @@
       var cells = splitLine(line, d).map(function (s) { return s.trim(); });
       var nc = cells.map(norm);
 
-      if (nc.some(function (c) { return c.indexOf(norm('\u0627\u0633\u0645 \u0627\u0644\u0645\u0642\u0631\u0631')) !== -1; })) {
+      if (nc.some(function (c) { return c.indexOf(NAME_KEY) !== -1; })) {
         var find = function (k) { return nc.findIndex(function (c) { return c.indexOf(norm(k)) !== -1; }); };
         map = {
-          ac: find('\u0639\u0627\u0645 \u0627\u0644\u062A\u0642\u062F\u064A\u0645'),
-          term: find('\u0627\u0644\u0641\u0635\u0644 \u0627\u0644\u062F\u0631\u0627\u0633\u064A'),
-          name: find('\u0627\u0633\u0645 \u0627\u0644\u0645\u0642\u0631\u0631'),
-          cy: find('\u0633\u0646\u0629 \u0627\u0644\u0645\u0642\u0631\u0631'),
-          p: find('\u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0639\u0645\u0644\u064A'),
-          e: find('\u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0627\u0645\u062A\u062D\u0627\u0646'),
-          f: find('\u0627\u0644\u0639\u0644\u0627\u0645\u0629 \u0627\u0644\u0646\u0647\u0627\u0626\u064A\u0629')
+          ac: find('عام التقديم'),
+          term: find('الفصل الدراسي'),
+          name: find('اسم المقرر'),
+          cy: find('سنة المقرر'),
+          p: find('علامة العملي'),
+          e: find('علامة الامتحان'),
+          f: find('العلامة النهائية'),
+          h: find('الساعات')
         };
         continue;
       }
@@ -112,8 +113,8 @@
       var m = map;
       if (!m) {
         m = cells.length >= 7
-          ? { ac: 0, term: 1, name: 2, cy: 3, p: 4, e: 5, f: 6 }
-          : { ac: -1, term: -1, name: 0, cy: 1, p: 2, e: 3, f: 4 };
+          ? { ac: 0, term: 1, name: 2, cy: 3, p: 4, e: 5, f: 6, h: -1 }
+          : { ac: -1, term: -1, name: 0, cy: 1, p: 2, e: 3, f: 4, h: -1 };
       }
       var get = function (i) { return i >= 0 && i < cells.length ? cells[i] : ''; };
 
@@ -122,15 +123,14 @@
       var p = parseNum(get(m.p));
       var e = parseNum(get(m.e));
       var f = parseNum(get(m.f));
+      var h = m.h >= 0 ? parseNum(get(m.h)) : null;
 
       if (!name || !cy || (p === null && e === null && f === null)) { skipped++; continue; }
       if (f === null) f = (p || 0) + (e || 0);
 
-      rows.push({
-        ac: m.ac >= 0 ? acLabel(get(m.ac)) : ctx.ac,
-        term: m.term >= 0 ? get(m.term) : ctx.term,
-        name: name, cy: cy, p: p, e: e, f: f
-      });
+      var ac = m.ac >= 0 ? acLabel(get(m.ac)) : ctx.ac;
+      var term = m.term >= 0 ? get(m.term) : ctx.term;
+      rows.push({ ac: ac || ctx.ac, term: term || ctx.term, name: name, cy: cy, p: p, e: e, f: f, h: h });
     }
     return { rows: rows, skipped: skipped };
   }
