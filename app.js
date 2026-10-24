@@ -17,7 +17,7 @@
   let nextId = 1;
   let mode = 'course';      // course | study
   let weighted = false;
-  let divMode = 'five';     // five | avail
+  let divMode = 'avail';    // five | avail (الافتراضي كما في التطبيق: السنوات المتوفرة)
   let tab = 'courses';
   let yearFilter = 'all';
   let query = '';
@@ -139,14 +139,7 @@
       </div></div>`;
 
     if (!courses.length) {
-      html += `<div class="empty"><p>ما في مواد بعد. ارفع ملف CSV، أو الصق الجدول من موقع الجامعة، أو أضف مادة يدوياً.</p>
-        <div class="btns">
-          <button class="btn primary" type="button" id="emptyUpload">رفع ملف CSV</button>
-          <button class="btn primary" type="button" id="emptyPaste">لصق الجدول</button>
-          <button class="btn" type="button" id="emptyAdd">إضافة مادة</button>
-        </div>
-        <p class="privacy">🔒 كل شيء يتم داخل متصفحك فقط: لا تُرسل علاماتك لأي خادم، ولا يُخزَّن شيء على جهازك.</p></div>`;
-      setHTML($('viewCourses'), html);
+      setHTML($('viewCourses'), welcomeHTML());
       return;
     }
 
@@ -183,6 +176,46 @@
     if (!shown) html += `<div class="empty"><p>ما في مواد مطابقة للبحث.</p></div>`;
     setHTML($('viewCourses'), html);
     if (hadFocus) { const qi = $('q'); qi.focus(); qi.setSelectionRange(caret, caret); }
+  }
+
+  function welcomeHTML() {
+    const card = (id, cls, ic, title, desc) => `<button type="button" class="acard ${cls}" id="${id}">
+      <span class="aic" aria-hidden="true">${ic}</span>
+      <span class="atx"><b>${title}</b><small>${desc}</small></span></button>`;
+    return `<div class="welcome">
+      <div class="wicon" aria-hidden="true">🎓</div>
+      <h2>أهلاً بك في علاماتي</h2>
+      <p class="wsub">ابدأ بإضافة علاماتك بإحدى هذه الطرق</p>
+      ${card('emptyPaste', 'primary', '📋', 'لصق جدول العلامات', 'انسخ الجدول من موقع الجامعة والصقه هنا، وهي الأسرع.')}
+      ${card('emptyUpload', '', '⬆', 'رفع ملف CSV', 'اختر ملف جدول العلامات من جهازك.')}
+      ${card('emptyAdd', '', '✎', 'إضافة مادة يدوياً', 'اكتب علامة كل مادة بنفسك.')}
+      <p class="privacy">🔒 كل شيء يتم داخل متصفحك: لا تُرسل علاماتك لأي خادم. تُحفظ المواد على جهازك لتبقى عند إعادة فتح الصفحة، ولا يُحفظ رقمك الجامعي ولا الوطني. يمكنك حذفها بـ«مسح الكل».</p>
+    </div>`;
+  }
+
+  /* ---------- الحفظ على الجهاز (مثل التطبيق) ---------- */
+  const STORE_KEY = 'marks_state_v1';
+  let storeOk = true;
+  function saveState() {
+    if (!storeOk) return;
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({ courses, snapshot, mode, divMode, weighted }));
+    } catch (_) { /* التخزين غير متاح: نكمل بدون حفظ */ }
+  }
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      const j = JSON.parse(raw);
+      const clean = v => Array.isArray(v) ? v.filter(c => c && typeof c.name === 'string' && Number.isInteger(c.cy) && typeof c.f === 'number') : [];
+      courses = clean(j.courses); snapshot = clean(j.snapshot);
+      if (j.mode === 'study') mode = 'study';
+      if (j.divMode === 'five') divMode = 'five';
+      weighted = j.weighted === true;
+      nextId = [...courses, ...snapshot].reduce((m, c) => Math.max(m, c.id || 0), 0) + 1;
+    } catch (_) {
+      storeOk = false; // بيانات تالفة: لا نكتب فوقها
+    }
   }
 
   function termSeries() {
@@ -253,12 +286,17 @@
   }
 
   function render() {
+    const empty = !courses.length;
+    $('hero').hidden = empty; $('tabs').hidden = empty;
+    if (empty) tab = 'courses';
     renderHero(); renderCourses(); renderStats();
     $('viewCourses').hidden = tab !== 'courses';
     $('viewStats').hidden = tab !== 'stats';
     $('tabCourses').setAttribute('aria-selected', tab === 'courses');
     $('tabStats').setAttribute('aria-selected', tab === 'stats');
-    $('fab').hidden = tab !== 'courses';
+    $('fab').hidden = empty || tab !== 'courses';
+    $('btnUpload').hidden = empty; $('btnPaste').hidden = empty;
+    saveState();
     $('btnExport').hidden = !courses.length;
     $('btnReset').hidden = !snapshot.length;
     $('btnClear').hidden = !courses.length && !snapshot.length;
@@ -454,9 +492,15 @@
     }
     clearTimeout(clearT); clearArmed = false; b.textContent = 'مسح الكل'; b.classList.remove('armed');
     courses = []; snapshot = []; nextId = 1; yearFilter = 'all'; query = '';
-    render(); toast('تم مسح كل البيانات من الصفحة');
+    render(); toast('تم مسح كل البيانات');
   };
 
+  $('copyTg').onclick = () => {
+    const done = () => toast('تم نسخ معرّف تلغرام');
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText('@m7md_ite0').then(done, done);
+    else done();
+  };
+  loadState();
   $('fCy').innerHTML = YEARS.map((y, i) => `<option value="${i + 1}">${y}</option>`).join('');
   render();
 })();
